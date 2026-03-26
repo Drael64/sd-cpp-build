@@ -1,33 +1,66 @@
-# 1. Update the component list to match the ROCm 7.1.1 repo structure
-$base_url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.1.1"
-$components = @(
-    "rocm_sdk_core-0.1.dev0-py3-none-win_amd64.whl",
-    "rocm_sdk_devel-0.1.dev0-py3-none-win_amd64.whl",
-    "rocm_sdk_libraries_custom-0.1.dev0-py3-none-win_amd64.whl"
-)
+name: ROCm Build Farm
+on: workflow_dispatch
 
-New-Item -ItemType Directory -Force -Path "D:/ROCm_Temp"
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          repository: leejet/stable-diffusion.cpp
+          submodules: recursive
 
-foreach ($c in $components) {
-    Write-Host "Downloading $c..."
-    Invoke-WebRequest -Uri "$base_url/$c" -OutFile "D:/ROCm_Temp/$c"
-    Write-Host "Extracting $c..."
-    # Rename to .zip for Expand-Archive compatibility
-    Rename-Item -Path "D:/ROCm_Temp/$c" -NewName "temp.zip"
-    Expand-Archive -Path "D:/ROCm_Temp/temp.zip" -DestinationPath "D:/ROCm_Temp" -Force
-    Remove-Item "D:/ROCm_Temp/temp.zip"
-}
+      - name: Pull and Extract ROCm 7.1.1
+        shell: pwsh
+        run: |
+          $base_url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.1.1"
+          $components = @(
+            "rocm_sdk_core-0.1.dev0-py3-none-win_amd64.whl",
+            "rocm_sdk_devel-0.1.dev0-py3-none-win_amd64.whl",
+            "rocm_sdk_libraries_custom-0.1.dev0-py3-none-win_amd64.whl"
+          )
+          
+          mkdir D:/ROCm_Temp
+          foreach ($c in $components) {
+            Write-Host "Fetching $c..."
+            Invoke-WebRequest -Uri "$base_url/$c" -OutFile "D:/ROCm_Temp/$c"
+            # Extract directly (Wheels are just ZIPs)
+            Expand-Archive -Path "D:/ROCm_Temp/$c" -DestinationPath "D:/ROCm_Temp" -Force
+          }
+          
+          # Find the compiler and the root
+          $clangPath = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "clang.exe" -Recurse | Select-Object -First 1 -ExpandProperty DirectoryName
+          $hipConfig = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "hip-config.cmake" -Recurse | Select-Object -First 1 -ExpandProperty DirectoryName
+          
+          if (-not $clangPath -or -not $hipConfig) { throw "Critical ROCm files missing!" }
+          
+          # Map paths for the next step
+          echo "ROCM_BIN=$clangPath" >> $env:GITHUB_ENV
+          echo "ROCM_PATH=D:/ROCm_Temp" >> $env:GITHUB_ENV
+          Write-Host "Ready to build with compiler at $clangPath"
 
-# 2. Set essential Environment Variables
-$ROCM_PATH = "D:/ROCm_Temp"
-$env:HIP_PATH = $ROCM_PATH
-$env:HIP_PLATFORM = "amd"  # Critical: Fixes the 'could not identify platform' bug in ROCm 7.x
-$env:CMAKE_PREFIX_PATH = $ROCM_PATH
+      - name: Build SD.CPP
+        shell: pwsh
+        run: |
+          $env:HIP_PLATFORM = "amd"
+          $clang_exe = "${{ env.ROCM_BIN }}/clang.exe"
+          $clangpp_exe = "${{ env.ROCM_BIN }}/clang++.exe"
+          
+          mkdir build; cd build
+          cmake .. -G "Ninja" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DSD_HIPBLAS=ON `
+            -DCMAKE_PREFIX_PATH="${{ env.ROCM_PATH }}" `
+            -DCMAKE_C_COMPILER="$clang_exe" `
+            -DCMAKE_CXX_COMPILER="$clangpp_exe" `
+            -DGPU_TARGETS="gfx1030"
+          ninja
 
-# 3. Locate the compiler (usually in the _rocm_sdk_core subfolder)
-$compiler = Get-ChildItem -Path $ROCM_PATH -Filter "clang.exe" -Recurse | Select-Object -First 1
-if ($compiler) {
-    $env:CC = $compiler.FullName
-    $env:CXX = ($compiler.FullName -replace "clang.exe", "clang++.exe")
-    Write-Host "Compiler found at: $($env:CC)"
-}
+      - name: Upload Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: sd-cpp-rocm-binaries
+          path: |
+            build/bin/*.exe
+            build/bin/*.dll
