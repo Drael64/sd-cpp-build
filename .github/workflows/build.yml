@@ -23,22 +23,32 @@ jobs:
           
           mkdir D:/ROCm_Temp
           foreach ($c in $components) {
-            Write-Host "Fetching $c..."
+            Write-Host "Downloading $c..."
             Invoke-WebRequest -Uri "$base_url/$c" -OutFile "D:/ROCm_Temp/$c"
-            # Extract directly (Wheels are just ZIPs)
-            Expand-Archive -Path "D:/ROCm_Temp/$c" -DestinationPath "D:/ROCm_Temp" -Force
+            # Use 7-Zip to extract - it is much more reliable than Expand-Archive
+            7z x "D:/ROCm_Temp/$c" -o"D:/ROCm_Temp" -y | Out-Null
           }
           
-          # Find the compiler and the root
+          # Debug: List top-level folders to verify extraction
+          Write-Host "Extraction complete. Looking for files..."
+          ls D:/ROCm_Temp -Recurse -Depth 2 | select Name, FullName
+
+          # Find the compiler
           $clangPath = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "clang.exe" -Recurse | Select-Object -First 1 -ExpandProperty DirectoryName
+          
+          # Find the HIP Config
           $hipConfig = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "hip-config.cmake" -Recurse | Select-Object -First 1 -ExpandProperty DirectoryName
           
-          if (-not $clangPath -or -not $hipConfig) { throw "Critical ROCm files missing!" }
+          if (-not $clangPath) { throw "Could not find clang.exe!" }
+          if (-not $hipConfig) { 
+             Write-Host "Warning: hip-config.cmake not found. Searching for any .cmake files..."
+             Get-ChildItem -Path "D:/ROCm_Temp" -Filter "*.cmake" -Recurse | Select-Object -First 5 -ExpandProperty FullName
+             throw "Critical ROCm config files missing!" 
+          }
           
-          # Map paths for the next step
           echo "ROCM_BIN=$clangPath" >> $env:GITHUB_ENV
           echo "ROCM_PATH=D:/ROCm_Temp" >> $env:GITHUB_ENV
-          Write-Host "Ready to build with compiler at $clangPath"
+          Write-Host "Success: Compiler found at $clangPath"
 
       - name: Build SD.CPP
         shell: pwsh
