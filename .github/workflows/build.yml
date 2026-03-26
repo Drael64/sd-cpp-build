@@ -18,29 +18,38 @@ jobs:
           Invoke-WebRequest -Uri "$base_url/rocm_sdk_core-0.1.dev0-py3-none-win_amd64.whl" -OutFile "core.zip"
           Invoke-WebRequest -Uri "$base_url/rocm_sdk_devel-0.1.dev0-py3-none-win_amd64.whl" -OutFile "devel.zip"
           
-          # Extract everything to a temporary folder
           Expand-Archive -Path "core.zip" -DestinationPath "D:/ROCm_Temp"
           Expand-Archive -Path "devel.zip" -DestinationPath "D:/ROCm_Temp"
           
-          # FIND THE COMPILER: This looks for clang.exe wherever it is hiding
+          # 1. Find the Compiler
           $clangPath = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "clang.exe" -Recurse | Select-Object -First 1 -ExpandProperty DirectoryName
-          if (-not $clangPath) { throw "Could not find clang.exe in extracted files!" }
           
-          # Save the path for the next step
+          # 2. Find the HIP Config (The fix for your current error)
+          # We look for the folder containing hip-config.cmake
+          $hipConfigPath = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "hip-config.cmake" -Recurse | Select-Object -First 1 -ExpandProperty DirectoryName
+          # We need the root of that SDK component, usually 3 levels up from the cmake file
+          $rocmRoot = (Get-Item $hipConfigPath).Parent.Parent.Parent.FullName
+          
+          if (-not $clangPath -or -not $rocmRoot) { throw "Could not find ROCm components!" }
+          
           echo "ROCM_BIN=$clangPath" >> $env:GITHUB_ENV
-          Write-Host "Found ROCm Compiler at: $clangPath"
+          echo "ROCM_PREFIX=$rocmRoot" >> $env:GITHUB_ENV
+          
+          Write-Host "Compiler found at: $clangPath"
+          Write-Host "ROCm Prefix set to: $rocmRoot"
 
       - name: Build SD.CPP
         shell: pwsh
         run: |
-          # Use the path we found in the previous step
           $clang_exe = "${{ env.ROCM_BIN }}/clang.exe"
           $clangpp_exe = "${{ env.ROCM_BIN }}/clang++.exe"
           
           mkdir build; cd build
+          # CMAKE_PREFIX_PATH tells CMake where to look for hip-config.cmake and hipblas-config.cmake
           cmake .. -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
             -DSD_HIPBLAS=ON `
+            -DCMAKE_PREFIX_PATH="${{ env.ROCM_PREFIX }}" `
             -DCMAKE_C_COMPILER="$clang_exe" `
             -DCMAKE_CXX_COMPILER="$clangpp_exe" `
             -DGPU_TARGETS="gfx1030"
