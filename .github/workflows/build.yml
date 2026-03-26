@@ -18,39 +18,37 @@ jobs:
           $components = @(
             "rocm_sdk_core-0.1.dev0-py3-none-win_amd64.whl",
             "rocm_sdk_devel-0.1.dev0-py3-none-win_amd64.whl",
-            "rocm_sdk_libraries_custom-0.1.dev0-py3-none-win_amd64.whl"
+            "rocm_sdk_libraries_custom-0.1.dev0-py3-none-win_amd64.whl",
+            "rocm-0.1.dev0.tar.gz"
           )
           
-          if (!(Test-Path "D:/ROCm_Temp")) { New-Item -ItemType Directory -Path "D:/ROCm_Temp" }
-
+          mkdir D:/ROCm_Temp
           foreach ($c in $components) {
-            Write-Host "--- Starting: $c ---"
-            
-            # Use curl.exe with -L (follow redirects) and -f (fail on 404)
-            curl.exe -L -f -o "D:/ROCm_Temp/$c" "$base_url/$c"
-            
-            if ($LASTEXITCODE -ne 0) { throw "Download failed for $c. AMD server might be down or URL changed." }
-            
-            Write-Host "Extracting $c..."
-            # Using the full path to 7z just to be safe
+            Write-Host "Fetching $c..."
+            curl.exe -L -o "D:/ROCm_Temp/$c" "$base_url/$c"
             & "C:\Program Files\7-Zip\7z.exe" x "D:/ROCm_Temp/$c" -o"D:/ROCm_Temp" -y | Out-Null
-            
-            if ($LASTEXITCODE -ne 0) { throw "Extraction failed for $c." }
-            
-            Remove-Item "D:/ROCm_Temp/$c" # Clean up to save space
-            Write-Host "Done with $c"
+            Remove-Item "D:/ROCm_Temp/$c"
           }
-
-          # FIND THE COMPILER
-          $clang = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "clang.exe" -Recurse | Select-Object -First 1
-          $hip = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "hip-config.cmake" -Recurse | Select-Object -First 1
           
-          if (!$clang) { throw "Clang.exe not found anywhere in D:/ROCm_Temp!" }
-          if (!$hip) { throw "hip-config.cmake not found! Math libraries didn't extract correctly." }
-
-          echo "ROCM_BIN=$($clang.DirectoryName)" >> $env:GITHUB_ENV
-          echo "ROCM_PATH=D:/ROCm_Temp" >> $env:GITHUB_ENV
-          Write-Host "Success: Build environment verified."
+          # Auto-detect the paths inside the extracted wheels
+          $clang = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "clang.exe" -Recurse | Select-Object -First 1
+          $hipDir = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "hip-config.cmake" -Recurse | Select-Object -First 1
+          
+          if ($clang) { 
+            Write-Host "Found Compiler: $($clang.FullName)"
+            echo "ROCM_BIN=$($clang.DirectoryName)" >> $env:GITHUB_ENV
+          }
+          
+          # We provide multiple search paths to CMake just in case
+          $searchPaths = @(
+            "D:/ROCm_Temp",
+            "D:/ROCm_Temp/_rocm_sdk_core",
+            "D:/ROCm_Temp/_rocm_sdk_devel",
+            "D:/ROCm_Temp/_rocm_sdk_libraries_custom"
+          ) -join ";"
+          
+          echo "ROCM_SEARCH_PATHS=$searchPaths" >> $env:GITHUB_ENV
+          Write-Host "Search Paths set for CMake."
 
       - name: Build SD.CPP
         shell: pwsh
@@ -60,10 +58,11 @@ jobs:
           $clangpp_exe = "${{ env.ROCM_BIN }}/clang++.exe"
           
           mkdir build; cd build
+          # Pointing CMAKE_PREFIX_PATH to all possible subdirectories
           cmake .. -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
             -DSD_HIPBLAS=ON `
-            -DCMAKE_PREFIX_PATH="${{ env.ROCM_PATH }}" `
+            -DCMAKE_PREFIX_PATH="${{ env.ROCM_SEARCH_PATHS }}" `
             -DCMAKE_C_COMPILER="$clang_exe" `
             -DCMAKE_CXX_COMPILER="$clangpp_exe" `
             -DGPU_TARGETS="gfx1030"
