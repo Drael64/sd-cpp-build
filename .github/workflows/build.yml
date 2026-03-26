@@ -1,4 +1,17 @@
-- name: Pull and Extract ROCm 7.1.1
+name: ROCm Build Farm
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          repository: leejet/stable-diffusion.cpp
+          submodules: recursive
+
+      - name: Pull and Extract ROCm 7.1.1
         shell: pwsh
         run: |
           $base_url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.1.1"
@@ -8,22 +21,27 @@
             "rocm_sdk_libraries_custom-0.1.dev0-py3-none-win_amd64.whl"
           )
           
-          mkdir D:/ROCm_Temp
+          if (!(Test-Path "D:/ROCm_Temp")) { mkdir D:/ROCm_Temp }
+
           foreach ($c in $components) {
             Write-Host "`n=== Fetching $c ==="
             curl.exe -L -o "D:/ROCm_Temp/$c" "$base_url/$c"
             
             Write-Host "=== Primary Extraction $c ==="
-            & "C:\Program Files\7-Zip\7z.exe" x "D:/ROCm_Temp/$c" -o"D:/ROCm_Temp" -y | Out-Null
+            & "C:\Program Files\7-Zip\7z.exe" x "D:/ROCm_Temp/$c" -o"D:/ROCm_Temp" -y
             Remove-Item "D:/ROCm_Temp/$c"
           }
 
-          # NEW: Recursive extraction for the 'devel' content
-          Write-Host "`n=== DEEP SEARCH: Extracting nested installers ==="
-          $nested = Get-ChildItem -Path "D:/ROCm_Temp" -Include "*.msi","*.exe","*.cab" -Recurse
-          foreach ($file in $nested) {
-            Write-Host "Unpacking nested: $($file.Name)"
-            & "C:\Program Files\7-Zip\7z.exe" x "$($file.FullName)" -o"D:/ROCm_Temp" -y | Out-Null
+          Write-Host "`n=== DEEP SEARCH: Unpacking Nested Installers ==="
+          # Find any MSIs or EXEs extracted from the wheels
+          $nested = Get-ChildItem -Path "D:/ROCm_Temp" -Include "*.msi","*.exe" -Recurse
+          if ($nested) {
+            foreach ($file in $nested) {
+              Write-Host "Unpacking nested container: $($file.Name)"
+              & "C:\Program Files\7-Zip\7z.exe" x "$($file.FullName)" -o"D:/ROCm_Temp" -y
+            }
+          } else {
+            Write-Host "No nested installers found. The 8 files in 'devel' might be something else."
           }
           
           Write-Host "`n=== DETECTING ROCM ENVIRONMENT ==="
@@ -32,19 +50,22 @@
           $clang = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "clang.exe" -Recurse | Select-Object -First 1
           if ($clang) { 
             Write-Host "Compiler Found: $($clang.FullName)"
-            echo "ROCM_BIN=$($clang.DirectoryName.Replace('\', '/'))" >> $env:GITHUB_ENV
-          } else { Write-Host "CRITICAL: Clang compiler missing!" ; exit 1 }
+            $binPath = $clang.DirectoryName.Replace('\', '/')
+            echo "ROCM_BIN=$binPath" >> $env:GITHUB_ENV
+          } else { 
+            Write-Host "CRITICAL: clang.exe not found!"
+            exit 1 
+          }
           
           # 2. Find HIP Config
-          # We'll search for the directory first to be safe
           $hipConfig = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "hip-config.cmake" -Recurse | Select-Object -First 1
           if ($hipConfig) {
             $hipDir = $hipConfig.DirectoryName.Replace('\', '/')
             Write-Host "HIP Config Directory: $hipDir"
             echo "HIP_DIR=$hipDir" >> $env:GITHUB_ENV
           } else {
-            Write-Host "DUMPING FILE STRUCTURE (First 50 files) to see where we are:"
-            Get-ChildItem -Path "D:/ROCm_Temp" -Recurse | Select-Object -First 50 FullName
+            Write-Host "CRITICAL: hip-config.cmake not found. Dumping top 30 files for debug:"
+            Get-ChildItem -Path "D:/ROCm_Temp" -Recurse | Select-Object -First 30 FullName
             exit 1
           }
 
@@ -55,3 +76,33 @@
             Write-Host "HIPBLAS Config Directory: $hipblasDir"
             echo "HIPBLAS_DIR=$hipblasDir" >> $env:GITHUB_ENV
           }
+
+      - name: Build SD.CPP
+        shell: pwsh
+        run: |
+          $env:HIP_PLATFORM = "amd"
+          
+          # Use the paths discovered in the previous step
+          $clang_exe = "${{ env.ROCM_BIN }}/clang.exe"
+          $clangpp_exe = "${{ env.ROCM_BIN }}/clang++.exe"
+          
+          if (!(Test-Path "build")) { mkdir build }
+          cd build
+          
+          cmake .. -G "Ninja" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DSD_HIPBLAS=ON `
+            -Dhip_DIR="${{ env.HIP_DIR }}" `
+            -Dhipblas_DIR="${{ env.HIPBLAS_DIR }}" `
+            -DCMAKE_C_COMPILER="$clang_exe" `
+            -DCMAKE_CXX_COMPILER="$clangpp_exe" `
+            -DGPU_TARGETS="gfx1030"
+          ninja
+
+      - name: Upload Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: sd-cpp-rocm-binaries
+          path: |
+            build/bin/*.exe
+            build/bin/*.dll
