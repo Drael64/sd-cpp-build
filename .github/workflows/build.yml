@@ -1,9 +1,9 @@
 name: ROCm Build Farm
 on: workflow_dispatch
-
 jobs:
   build:
     runs-on: windows-2022
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -11,58 +11,52 @@ jobs:
           repository: leejet/stable-diffusion.cpp
           submodules: recursive
 
-      - name: Install Ninja
-        run: choco install ninja -y
+      - name: Install Ninja and VC++ Redist
+        run: choco install ninja vcredist-all -y --no-progress
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Install Python requests
-        run: python -m pip install requests
-
       - name: Download ROCm from GDrive
         shell: pwsh
         run: |
-          $code = @"
-          import requests
-          import os
-          def download():
-              file_id = '14vPV_HnFMfEei0B1mhoyJDEgN6RksWEH'
-              url = 'https://drive.google.com/uc?export=download'
-              s = requests.Session()
-              r = s.get(url, params={'id': file_id}, stream=True)
-              token = None
-              for k, v in r.cookies.items():
-                  if k.startswith('download_warning'): token = v
-              if token:
-                  r = s.get(url, params={'id': file_id, 'confirm': token}, stream=True)
-              with open('rocm-installer.exe', 'wb') as f:
-                  for chunk in r.iter_content(32768):
-                      if chunk: f.write(chunk)
-          download()
-          "@
-          $code | Out-File -FilePath download_rocm.py -Encoding ascii
-          python download_rocm.py
+          python -m pip install gdown -q
+          python -m gdown --id 14vPV_HnFMfEei0B1mhoyJDEgN6RksWEH -O rocm-installer.exe --fuzzy
+          if (!(Test-Path "rocm-installer.exe") -or (Get-Item "rocm-installer.exe").Length -lt 10MB) {
+            throw "Download failed or file is suspiciously small"
+          }
+          Write-Host "Downloaded: $((Get-Item rocm-installer.exe).Length / 1MB) MB"
 
-      - name: Extract ROCm SDK
+      - name: Install ROCm SDK
+        timeout-minutes: 25
         shell: pwsh
         run: |
-          # Instead of running the installer, we extract the files we need.
-          # This is 10x faster and won't hang the runner.
-          mkdir D:/ROCm_SDK
-          & "C:\Program Files\7-Zip\7z.exe" x rocm-installer.exe -o"D:/ROCm_SDK" -y | Out-Null
+          Write-Host "Running silent install..."
+          $proc = Start-Process -FilePath ".\rocm-installer.exe" `
+            -ArgumentList "/S /D=D:\ROCm" `
+            -Wait -PassThru -NoNewWindow
           
-          # Deep search for the actual bin/lib folders inside the extracted installer
-          $clang = Get-ChildItem "D:/ROCm_SDK" -Recurse -Filter "clang.exe" | Select-Object -First 1
-          if (!$clang) { throw "Clang not found in extracted SDK!" }
+          if ($proc.ExitCode -ne 0) {
+            Write-Host "NSIS silent failed (exit $($proc.ExitCode)), trying InnoSetup flags..."
+            Start-Process -FilePath ".\rocm-installer.exe" `
+              -ArgumentList "/VERYSILENT /DIR=D:\ROCm" `
+              -Wait -NoNewWindow
+          }
           
-          $hipDir = Get-ChildItem "D:/ROCm_SDK" -Recurse -Filter "hip-config.cmake" | Select-Object -First 1
-          $hipblasDir = Get-ChildItem "D:/ROCm_SDK" -Recurse -Filter "hipblas-config.cmake" | Select-Object -First 1
+          $clang = Get-ChildItem "D:/ROCm" -Recurse -Filter "clang.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (!$clang) {
+            Write-Host "Contents of D:\ROCm:"
+            Get-ChildItem "D:/ROCm" -Depth 3 | Select-Object FullName
+            throw "Clang not found after install — check the listing above"
+          }
+          Write-Host "Clang found at: $($clang.FullName)"
           
-          echo "ROCM_BIN_PATH=$($clang.DirectoryName)" >> $env:GITHUB_ENV
-          echo "HIP_DIR_PATH=$($hipDir.DirectoryName.Replace('\', '/'))" >> $env:GITHUB_ENV
-          echo "HIPBLAS_DIR_PATH=$($hipblasDir.DirectoryName.Replace('\', '/'))" >> $env:GITHUB_ENV
-          Write-Host "Found Clang at: $($clang.FullName)"
+          $hipCfg     = Get-ChildItem "D:/ROCm" -Recurse -Filter "hip-config.cmake"     | Select-Object -First 1
+          $hipblasCfg = Get-ChildItem "D:/ROCm" -Recurse -Filter "hipblas-config.cmake" | Select-Object -First 1
+          
+          echo "ROCM_BIN_PATH=$($clang.DirectoryName -replace '\\','/')"         >> $env:GITHUB_ENV
+          echo "HIP_DIR_PATH=$($hipCfg.DirectoryName -replace '\\','/')"         >> $env:GITHUB_ENV
+          echo "HIPBLAS_DIR_PATH=$($hipblasCfg.DirectoryName -replace '\\','/')" >> $env:GITHUB_ENV
 
       - name: Build SD.cpp
         shell: pwsh
@@ -70,7 +64,7 @@ jobs:
           $env:HSA_OVERRIDE_GFX_VERSION = "10.3.0"
           $env:HIP_PLATFORM = "amd"
           
-          $bin = "${{ env.ROCM_BIN_PATH }}".Replace('\', '/')
+          $bin = "${{ env.ROCM_BIN_PATH }}"
           
           mkdir build; cd build
           cmake .. -G "Ninja" `
@@ -80,12 +74,10 @@ jobs:
             -DCMAKE_CXX_COMPILER="$bin/clang++.exe" `
             -Dhip_DIR="${{ env.HIP_DIR_PATH }}" `
             -Dhipblas_DIR="${{ env.HIPBLAS_DIR_PATH }}" `
-            -DGPU_TARGETS=gfx1030 `
-            -DAMDGPU_TARGETS=gfx1030 `
-            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON `
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+            -DAMDGPU_TARGETS="gfx1030" `
+            -DGPU_TARGETS="gfx1030"
           
-          ninja
+          ninja -v
 
       - name: Upload Binaries
         uses: actions/upload-artifact@v4
