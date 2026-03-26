@@ -29,35 +29,52 @@ jobs:
             Remove-Item "D:/ROCm_Temp/$c"
           }
           
-          # Find the compiler path
+          Write-Host "--- DETECTING ROCM ENVIRONMENT ---"
+          
+          # 1. Find Compiler
           $clang = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "clang.exe" -Recurse | Select-Object -First 1
+          if ($clang) { 
+            Write-Host "Compiler: $($clang.FullName)"
+            echo "ROCM_BIN=$($clang.DirectoryName.Replace('\', '/'))" >> $env:GITHUB_ENV
+          } else { throw "Clang compiler missing!" }
           
-          # Find ALL directories containing .cmake files to ensure HIP/HIPBLAS are found
-          $cmakePaths = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "*.cmake" -Recurse | 
-                         Select-Object -ExpandProperty DirectoryName -Unique | 
-                         ForEach-Object { $_.Replace('\', '/') }
-          
-          $combinedPaths = ($cmakePaths + "D:/ROCm_Temp") -join ";"
-          
-          echo "ROCM_BIN=$($clang.DirectoryName)" >> $env:GITHUB_ENV
-          echo "ROCM_CMAKE_PATHS=$combinedPaths" >> $env:GITHUB_ENV
-          Write-Host "Found $($cmakePaths.Count) CMake config locations."
+          # 2. Find HIP Config
+          $hipConfig = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "hip-config.cmake" -Recurse | Select-Object -First 1
+          if ($hipConfig) {
+            $hipDir = $hipConfig.DirectoryName.Replace('\', '/')
+            Write-Host "HIP Config Directory: $hipDir"
+            echo "HIP_DIR=$hipDir" >> $env:GITHUB_ENV
+          } else {
+            Write-Host "CRITICAL: hip-config.cmake NOT FOUND! Dumping all CMake files for inspection:"
+            Get-ChildItem -Path "D:/ROCm_Temp" -Filter "*.cmake" -Recurse | Select-Object FullName
+            throw "HIP CMake configuration is missing from the extracted files."
+          }
+
+          # 3. Find HIPBLAS Config
+          $hipblasConfig = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "hipblas-config.cmake" -Recurse | Select-Object -First 1
+          if ($hipblasConfig) {
+            $hipblasDir = $hipblasConfig.DirectoryName.Replace('\', '/')
+            Write-Host "HIPBLAS Config Directory: $hipblasDir"
+            echo "HIPBLAS_DIR=$hipblasDir" >> $env:GITHUB_ENV
+          } else { Write-Host "Warning: hipblas-config.cmake not found." }
 
       - name: Build SD.CPP
         shell: pwsh
         run: |
           $env:HIP_PLATFORM = "amd"
-          # Set HIP_PATH so the build knows where the root of the SDK is
           $env:HIP_PATH = "D:/ROCm_Temp/_rocm_sdk_devel" 
           
           $clang_exe = "${{ env.ROCM_BIN }}/clang.exe"
           $clangpp_exe = "${{ env.ROCM_BIN }}/clang++.exe"
           
           mkdir build; cd build
+          
+          # Force feed the exact GPS coordinates to CMake
           cmake .. -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
             -DSD_HIPBLAS=ON `
-            -DCMAKE_PREFIX_PATH="${{ env.ROCM_CMAKE_PATHS }}" `
+            -Dhip_DIR="${{ env.HIP_DIR }}" `
+            -Dhipblas_DIR="${{ env.HIPBLAS_DIR }}" `
             -DCMAKE_C_COMPILER="$clang_exe" `
             -DCMAKE_CXX_COMPILER="$clangpp_exe" `
             -DGPU_TARGETS="gfx1030"
