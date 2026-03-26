@@ -1,9 +1,13 @@
 name: ROCm Build Farm
-on: workflow_dispatch
+
+on:
+  workflow_dispatch:
+
 jobs:
   build:
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 90
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -12,6 +16,7 @@ jobs:
           submodules: recursive
 
       - name: Install Ninja and VC++ Redist
+        shell: pwsh
         run: choco install ninja vcredist-all -y --no-progress
 
       - name: Setup MSVC
@@ -20,25 +25,35 @@ jobs:
       - name: Download ROCm from GDrive
         shell: pwsh
         run: |
-          python -m pip install gdown -q
-          python -m gdown --id 14vPV_HnFMfEei0B1mhoyJDEgN6RksWEH -O rocm-installer.exe --fuzzy
-          if (!(Test-Path "rocm-installer.exe") -or (Get-Item "rocm-installer.exe").Length -lt 10MB) {
+          $ErrorActionPreference = "Stop"
+          python -m pip install --disable-pip-version-check --quiet gdown
+          python -m gdown --fuzzy "https://drive.google.com/uc?id=14vPV_HnFMfEei0B1mhoyJDEgN6RksWEH" -O rocm-installer.exe
+
+          if (!(Test-Path "rocm-installer.exe")) {
+            throw "Download failed: rocm-installer.exe was not created"
+          }
+
+          $size = (Get-Item "rocm-installer.exe").Length
+          Write-Host "Downloaded installer size: $([math]::Round($size / 1MB, 2)) MB"
+
+          if ($size -lt 100MB) {
             throw "Download failed or file is suspiciously small"
           }
-          Write-Host "Downloaded: $((Get-Item rocm-installer.exe).Length / 1MB) MB"
 
       - name: Install ROCm SDK
-        timeout-minutes: 25
+        timeout-minutes: 30
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           Write-Host "Running silent install..."
+
           Start-Process -FilePath ".\rocm-installer.exe" `
-            -ArgumentList "-install", "-log", "C:\rocm-install.log" `
+            -ArgumentList "-install","-log","C:\rocm-install.log" `
             -Wait -NoNewWindow
-          
+
           Write-Host "--- Install log tail ---"
-          Get-Content "C:\rocm-install.log" -Tail 30 -ErrorAction SilentlyContinue
-          
+          Get-Content "C:\rocm-install.log" -Tail 40 -ErrorAction SilentlyContinue
+
           $clang = Get-ChildItem "C:\Program Files\AMD\ROCm" -Recurse -Filter "clang.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (!$clang) {
             Write-Host "Contents of C:\Program Files\AMD:"
@@ -46,36 +61,84 @@ jobs:
             throw "Clang not found after install"
           }
           Write-Host "Clang found at: $($clang.FullName)"
-          
-          $hipCfg     = Get-ChildItem "C:\Program Files\AMD\ROCm" -Recurse -Filter "hip-config.cmake"     | Select-Object -First 1
-          $hipblasCfg = Get-ChildItem "C:\Program Files\AMD\ROCm" -Recurse -Filter "hipblas-config.cmake" | Select-Object -First 1
-          
-          echo "ROCM_BIN_PATH=$($clang.DirectoryName -replace '\\','/')"          >> $env:GITHUB_ENV
-          echo "HIP_DIR_PATH=$($hipCfg.DirectoryName -replace '\\','/')"          >> $env:GITHUB_ENV
-          echo "HIPBLAS_DIR_PATH=$($hipblasCfg.DirectoryName -replace '\\','/')"  >> $env:GITHUB_ENV
+
+          $rocmRoot = Split-Path $clang.DirectoryName -Parent
+          Write-Host "ROCm root detected at: $rocmRoot"
+
+          $hipCfg = Get-ChildItem $rocmRoot -Recurse -Filter "hip-config.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (!$hipCfg) {
+            throw "hip-config.cmake not found"
+          }
+
+          $hipblasCfg = Get-ChildItem $rocmRoot -Recurse -Filter "hipblas-config.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (!$hipblasCfg) {
+            throw "hipblas-config.cmake not found"
+          }
+
+          $hipblasCommonCfg = Get-ChildItem $rocmRoot -Recurse -Filter "hipblas-common-config.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (!$hipblasCommonCfg) {
+            throw "hipblas-common-config.cmake not found. The HIP SDK installation looks incomplete."
+          }
+
+          echo "ROCM_ROOT=$rocmRoot" >> $env:GITHUB_ENV
+          echo "ROCM_BIN_PATH=$($clang.DirectoryName -replace '\\','/')" >> $env:GITHUB_ENV
+          echo "HIP_DIR_PATH=$($hipCfg.DirectoryName -replace '\\','/')" >> $env:GITHUB_ENV
+          echo "HIPBLAS_DIR_PATH=$($hipblasCfg.DirectoryName -replace '\\','/')" >> $env:GITHUB_ENV
+          echo "HIPBLAS_COMMON_DIR_PATH=$($hipblasCommonCfg.DirectoryName -replace '\\','/')" >> $env:GITHUB_ENV
 
       - name: Build SD.cpp
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           $env:HSA_OVERRIDE_GFX_VERSION = "10.3.0"
           $env:HIP_PLATFORM = "amd"
-          
+          $env:HIP_PATH = "${{ env.ROCM_ROOT }}"
+          $env:ROCM_PATH = "${{ env.ROCM_ROOT }}"
+
           $bin = "${{ env.ROCM_BIN_PATH }}"
-          
-          mkdir build; cd build
-          cmake .. -G "Ninja" `
+
+          if (!(Test-Path build)) {
+            New-Item -ItemType Directory -Path build | Out-Null
+          }
+
+          cmake -S . -B build -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
             -DSD_HIPBLAS=ON `
             -DCMAKE_C_COMPILER="$bin/clang.exe" `
             -DCMAKE_CXX_COMPILER="$bin/clang++.exe" `
+            -DCMAKE_PREFIX_PATH="${{ env.ROCM_ROOT }}" `
             -Dhip_DIR="${{ env.HIP_DIR_PATH }}" `
             -Dhipblas_DIR="${{ env.HIPBLAS_DIR_PATH }}" `
-            -DAMDGPU_TARGETS="gfx1030" `
-            -DGPU_TARGETS="gfx1030"
-          
-          ninja -v
+            -Dhipblas-common_DIR="${{ env.HIPBLAS_COMMON_DIR_PATH }}" `
+            -DAMDGPU_TARGETS=gfx1030 `
+            -DGPU_TARGETS=gfx1030 `
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON `
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON
 
-      - name: Upload Binaries
+          cmake --build build --config Release -v
+
+      - name: Copy logs for upload
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\rocm-install.log") {
+            Copy-Item "C:\rocm-install.log" ".\rocm-install.log" -Force
+          }
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocm-build-logs
+          path: |
+            rocm-install.log
+            build/CMakeFiles/CMakeError.log
+            build/CMakeFiles/CMakeOutput.log
+            build/CMakeCache.txt
+
+      - name: Upload binaries
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: sd-cpp-rocm-binaries
