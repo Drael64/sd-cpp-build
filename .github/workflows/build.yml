@@ -32,31 +32,27 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Running silent install..."
-          $proc = Start-Process -FilePath ".\rocm-installer.exe" `
-            -ArgumentList "/S /D=D:\ROCm" `
-            -Wait -PassThru -NoNewWindow
+          Start-Process -FilePath ".\rocm-installer.exe" `
+            -ArgumentList "-install", "-log", "C:\rocm-install.log" `
+            -Wait -NoNewWindow
           
-          if ($proc.ExitCode -ne 0) {
-            Write-Host "NSIS silent failed (exit $($proc.ExitCode)), trying InnoSetup flags..."
-            Start-Process -FilePath ".\rocm-installer.exe" `
-              -ArgumentList "/VERYSILENT /DIR=D:\ROCm" `
-              -Wait -NoNewWindow
-          }
+          Write-Host "--- Install log tail ---"
+          Get-Content "C:\rocm-install.log" -Tail 30 -ErrorAction SilentlyContinue
           
-          $clang = Get-ChildItem "D:/ROCm" -Recurse -Filter "clang.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $clang = Get-ChildItem "C:\Program Files\AMD\ROCm" -Recurse -Filter "clang.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (!$clang) {
-            Write-Host "Contents of D:\ROCm:"
-            Get-ChildItem "D:/ROCm" -Depth 3 | Select-Object FullName
-            throw "Clang not found after install — check the listing above"
+            Write-Host "Contents of C:\Program Files\AMD:"
+            Get-ChildItem "C:\Program Files\AMD" -Depth 3 -ErrorAction SilentlyContinue | Select-Object FullName
+            throw "Clang not found after install"
           }
           Write-Host "Clang found at: $($clang.FullName)"
           
-          $hipCfg     = Get-ChildItem "D:/ROCm" -Recurse -Filter "hip-config.cmake"     | Select-Object -First 1
-          $hipblasCfg = Get-ChildItem "D:/ROCm" -Recurse -Filter "hipblas-config.cmake" | Select-Object -First 1
+          $hipCfg     = Get-ChildItem "C:\Program Files\AMD\ROCm" -Recurse -Filter "hip-config.cmake"     | Select-Object -First 1
+          $hipblasCfg = Get-ChildItem "C:\Program Files\AMD\ROCm" -Recurse -Filter "hipblas-config.cmake" | Select-Object -First 1
           
-          echo "ROCM_BIN_PATH=$($clang.DirectoryName -replace '\\','/')"         >> $env:GITHUB_ENV
-          echo "HIP_DIR_PATH=$($hipCfg.DirectoryName -replace '\\','/')"         >> $env:GITHUB_ENV
-          echo "HIPBLAS_DIR_PATH=$($hipblasCfg.DirectoryName -replace '\\','/')" >> $env:GITHUB_ENV
+          echo "ROCM_BIN_PATH=$($clang.DirectoryName -replace '\\','/')"          >> $env:GITHUB_ENV
+          echo "HIP_DIR_PATH=$($hipCfg.DirectoryName -replace '\\','/')"          >> $env:GITHUB_ENV
+          echo "HIPBLAS_DIR_PATH=$($hipblasCfg.DirectoryName -replace '\\','/')"  >> $env:GITHUB_ENV
 
       - name: Build SD.cpp
         shell: pwsh
