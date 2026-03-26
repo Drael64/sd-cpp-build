@@ -18,8 +18,7 @@ jobs:
           $components = @(
             "rocm_sdk_core-0.1.dev0-py3-none-win_amd64.whl",
             "rocm_sdk_devel-0.1.dev0-py3-none-win_amd64.whl",
-            "rocm_sdk_libraries_custom-0.1.dev0-py3-none-win_amd64.whl",
-            "rocm-0.1.dev0.tar.gz"
+            "rocm_sdk_libraries_custom-0.1.dev0-py3-none-win_amd64.whl"
           )
           
           mkdir D:/ROCm_Temp
@@ -30,39 +29,35 @@ jobs:
             Remove-Item "D:/ROCm_Temp/$c"
           }
           
-          # Auto-detect the paths inside the extracted wheels
+          # Find the compiler path
           $clang = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "clang.exe" -Recurse | Select-Object -First 1
-          $hipDir = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "hip-config.cmake" -Recurse | Select-Object -First 1
           
-          if ($clang) { 
-            Write-Host "Found Compiler: $($clang.FullName)"
-            echo "ROCM_BIN=$($clang.DirectoryName)" >> $env:GITHUB_ENV
-          }
+          # Find ALL directories containing .cmake files to ensure HIP/HIPBLAS are found
+          $cmakePaths = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "*.cmake" -Recurse | 
+                         Select-Object -ExpandProperty DirectoryName -Unique | 
+                         ForEach-Object { $_.Replace('\', '/') }
           
-          # We provide multiple search paths to CMake just in case
-          $searchPaths = @(
-            "D:/ROCm_Temp",
-            "D:/ROCm_Temp/_rocm_sdk_core",
-            "D:/ROCm_Temp/_rocm_sdk_devel",
-            "D:/ROCm_Temp/_rocm_sdk_libraries_custom"
-          ) -join ";"
+          $combinedPaths = ($cmakePaths + "D:/ROCm_Temp") -join ";"
           
-          echo "ROCM_SEARCH_PATHS=$searchPaths" >> $env:GITHUB_ENV
-          Write-Host "Search Paths set for CMake."
+          echo "ROCM_BIN=$($clang.DirectoryName)" >> $env:GITHUB_ENV
+          echo "ROCM_CMAKE_PATHS=$combinedPaths" >> $env:GITHUB_ENV
+          Write-Host "Found $($cmakePaths.Count) CMake config locations."
 
       - name: Build SD.CPP
         shell: pwsh
         run: |
           $env:HIP_PLATFORM = "amd"
+          # Set HIP_PATH so the build knows where the root of the SDK is
+          $env:HIP_PATH = "D:/ROCm_Temp/_rocm_sdk_devel" 
+          
           $clang_exe = "${{ env.ROCM_BIN }}/clang.exe"
           $clangpp_exe = "${{ env.ROCM_BIN }}/clang++.exe"
           
           mkdir build; cd build
-          # Pointing CMAKE_PREFIX_PATH to all possible subdirectories
           cmake .. -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
             -DSD_HIPBLAS=ON `
-            -DCMAKE_PREFIX_PATH="${{ env.ROCM_SEARCH_PATHS }}" `
+            -DCMAKE_PREFIX_PATH="${{ env.ROCM_CMAKE_PATHS }}" `
             -DCMAKE_C_COMPILER="$clang_exe" `
             -DCMAKE_CXX_COMPILER="$clangpp_exe" `
             -DGPU_TARGETS="gfx1030"
