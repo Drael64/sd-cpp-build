@@ -11,43 +11,45 @@ jobs:
           repository: leejet/stable-diffusion.cpp
           submodules: recursive
 
-      - name: Pull ROCm SDK Core
+      - name: Pull ROCm SDK Components
         shell: pwsh
         run: |
-          # Pull the modular developer wheels/archives which contain the headers and libs
-          # These links are direct from the Radeon repo and bypass the EULA wall
           $base_url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.1.1"
-          
-          # Download the core and devel packages
           Invoke-WebRequest -Uri "$base_url/rocm_sdk_core-0.1.dev0-py3-none-win_amd64.whl" -OutFile "core.zip"
           Invoke-WebRequest -Uri "$base_url/rocm_sdk_devel-0.1.dev0-py3-none-win_amd64.whl" -OutFile "devel.zip"
           
-          # Extract them to a custom location
-          Expand-Archive -Path "core.zip" -DestinationPath "C:/ROCm_Custom"
-          Expand-Archive -Path "devel.zip" -DestinationPath "C:/ROCm_Custom"
+          # Extract everything to a temporary folder
+          Expand-Archive -Path "core.zip" -DestinationPath "D:/ROCm_Temp"
+          Expand-Archive -Path "devel.zip" -DestinationPath "D:/ROCm_Temp"
           
-          # Manually place the clang compiler in the expected path for the build
-          # (The .whl files are basically zips with the tools inside)
-          Write-Host "ROCm Components Extracted."
+          # FIND THE COMPILER: This looks for clang.exe wherever it is hiding
+          $clangPath = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "clang.exe" -Recurse | Select-Object -First 1 -ExpandProperty DirectoryName
+          if (-not $clangPath) { throw "Could not find clang.exe in extracted files!" }
+          
+          # Save the path for the next step
+          echo "ROCM_BIN=$clangPath" >> $env:GITHUB_ENV
+          Write-Host "Found ROCm Compiler at: $clangPath"
 
       - name: Build SD.CPP
         shell: pwsh
         run: |
-          # We point CMake to the folder where we just extracted everything
+          # Use the path we found in the previous step
+          $clang_exe = "${{ env.ROCM_BIN }}/clang.exe"
+          $clangpp_exe = "${{ env.ROCM_BIN }}/clang++.exe"
+          
           mkdir build; cd build
           cmake .. -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
             -DSD_HIPBLAS=ON `
-            -DCMAKE_PREFIX_PATH="C:/ROCm_Custom" `
-            -DCMAKE_C_COMPILER="C:/ROCm_Custom/bin/clang.exe" `
-            -DCMAKE_CXX_COMPILER="C:/ROCm_Custom/bin/clang++.exe" `
+            -DCMAKE_C_COMPILER="$clang_exe" `
+            -DCMAKE_CXX_COMPILER="$clangpp_exe" `
             -DGPU_TARGETS="gfx1030"
           ninja
 
       - name: Upload Binaries
         uses: actions/upload-artifact@v4
         with:
-          name: sd-cpp-binaries
+          name: stable-diffusion-rocm-binaries
           path: |
             build/bin/*.exe
             build/bin/*.dll
