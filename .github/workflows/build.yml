@@ -1,17 +1,4 @@
-name: ROCm Build Farm
-on: workflow_dispatch
-
-jobs:
-  build:
-    runs-on: windows-2022
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          repository: leejet/stable-diffusion.cpp
-          submodules: recursive
-
-      - name: Pull and Extract ROCm 7.1.1
+- name: Pull and Extract ROCm 7.1.1
         shell: pwsh
         run: |
           $base_url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.1.1"
@@ -26,10 +13,17 @@ jobs:
             Write-Host "`n=== Fetching $c ==="
             curl.exe -L -o "D:/ROCm_Temp/$c" "$base_url/$c"
             
-            Write-Host "=== Extracting $c ==="
-            # Removed Out-Null so we can see any 7-Zip path length errors
-            & "C:\Program Files\7-Zip\7z.exe" x "D:/ROCm_Temp/$c" -o"D:/ROCm_Temp" -y
+            Write-Host "=== Primary Extraction $c ==="
+            & "C:\Program Files\7-Zip\7z.exe" x "D:/ROCm_Temp/$c" -o"D:/ROCm_Temp" -y | Out-Null
             Remove-Item "D:/ROCm_Temp/$c"
+          }
+
+          # NEW: Recursive extraction for the 'devel' content
+          Write-Host "`n=== DEEP SEARCH: Extracting nested installers ==="
+          $nested = Get-ChildItem -Path "D:/ROCm_Temp" -Include "*.msi","*.exe","*.cab" -Recurse
+          foreach ($file in $nested) {
+            Write-Host "Unpacking nested: $($file.Name)"
+            & "C:\Program Files\7-Zip\7z.exe" x "$($file.FullName)" -o"D:/ROCm_Temp" -y | Out-Null
           }
           
           Write-Host "`n=== DETECTING ROCM ENVIRONMENT ==="
@@ -41,61 +35,23 @@ jobs:
             echo "ROCM_BIN=$($clang.DirectoryName.Replace('\', '/'))" >> $env:GITHUB_ENV
           } else { Write-Host "CRITICAL: Clang compiler missing!" ; exit 1 }
           
-          # Force listing of ALL CMake files
-          Write-Host "`n=== DUMPING ALL CMAKE FILES ==="
-          $allCmake = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "*.cmake" -Recurse
-          if ($allCmake) {
-             # Out-String ensures it prints synchronously
-             $allCmake | Select-Object -ExpandProperty FullName | Out-String | Write-Host
-          } else {
-             Write-Host "CRITICAL ERROR: Absolutely zero .cmake files were found! The extraction failed completely."
-             exit 1
-          }
-
           # 2. Find HIP Config
-          $hipConfig = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "*hip*config.cmake" -Recurse | Select-Object -First 1
+          # We'll search for the directory first to be safe
+          $hipConfig = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "hip-config.cmake" -Recurse | Select-Object -First 1
           if ($hipConfig) {
             $hipDir = $hipConfig.DirectoryName.Replace('\', '/')
             Write-Host "HIP Config Directory: $hipDir"
             echo "HIP_DIR=$hipDir" >> $env:GITHUB_ENV
           } else {
-            Write-Host "CRITICAL: *hip*config.cmake NOT FOUND! Review the CMake list above."
+            Write-Host "DUMPING FILE STRUCTURE (First 50 files) to see where we are:"
+            Get-ChildItem -Path "D:/ROCm_Temp" -Recurse | Select-Object -First 50 FullName
             exit 1
           }
 
           # 3. Find HIPBLAS Config
-          $hipblasConfig = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "*hipblas*config.cmake" -Recurse | Select-Object -First 1
+          $hipblasConfig = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "hipblas-config.cmake" -Recurse | Select-Object -First 1
           if ($hipblasConfig) {
             $hipblasDir = $hipblasConfig.DirectoryName.Replace('\', '/')
             Write-Host "HIPBLAS Config Directory: $hipblasDir"
             echo "HIPBLAS_DIR=$hipblasDir" >> $env:GITHUB_ENV
-          } else { Write-Host "Warning: *hipblas*config.cmake not found." }
-
-      - name: Build SD.CPP
-        shell: pwsh
-        run: |
-          $env:HIP_PLATFORM = "amd"
-          $env:HIP_PATH = "D:/ROCm_Temp/_rocm_sdk_devel" 
-          
-          $clang_exe = "${{ env.ROCM_BIN }}/clang.exe"
-          $clangpp_exe = "${{ env.ROCM_BIN }}/clang++.exe"
-          
-          mkdir build; cd build
-          
-          cmake .. -G "Ninja" `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DSD_HIPBLAS=ON `
-            -Dhip_DIR="${{ env.HIP_DIR }}" `
-            -Dhipblas_DIR="${{ env.HIPBLAS_DIR }}" `
-            -DCMAKE_C_COMPILER="$clang_exe" `
-            -DCMAKE_CXX_COMPILER="$clangpp_exe" `
-            -DGPU_TARGETS="gfx1030"
-          ninja
-
-      - name: Upload Binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: sd-cpp-rocm-binaries
-          path: |
-            build/bin/*.exe
-            build/bin/*.dll
+          }
