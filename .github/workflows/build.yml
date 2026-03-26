@@ -8,57 +8,64 @@ jobs:
     runs-on: windows-2022
 
     steps:
-      # Checkout sd.cpp
+      # Checkout stable-diffusion.cpp
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           repository: leejet/stable-diffusion.cpp
           submodules: recursive
 
-      # Install Ninja (build system)
+      # Install Ninja build system
       - name: Install Ninja
         shell: pwsh
         run: choco install ninja -y
 
-      # Load MSVC toolchain (required by ROCm clang)
+      # Load MSVC environment (ROCm clang depends on this!)
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
-      # Create temp folder
+      # Ensure Python requests is available
+      - name: Install Python requests
+        shell: pwsh
+        run: python -m pip install requests
+
+      # Prepare temp directory
       - name: Prepare temp folder
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path C:\Temp | Out-Null
 
-      # Download ROCm installer from Google Drive (handles virus warning automatically)
+      # Download ROCm installer from Google Drive (handles virus warning)
       - name: Download ROCm installer
         shell: pwsh
         run: |
-          python - << 'PY'
-          import requests, os
+          $ErrorActionPreference = "Stop"
 
-          file_id = "14vPV_HnFMfEei0B1mhoyJDEgN6RksWEH"
-          url = "https://drive.google.com/uc?export=download"
+          @'
+import requests
 
-          session = requests.Session()
-          response = session.get(url, params={'id': file_id}, stream=True)
+file_id = "14vPV_HnFMfEei0B1mhoyJDEgN6RksWEH"
+url = "https://drive.google.com/uc?export=download"
 
-          token = None
-          for k, v in response.cookies.items():
-              if k.startswith('download_warning'):
-                  token = v
+session = requests.Session()
+response = session.get(url, params={"id": file_id}, stream=True)
 
-          if token:
-              response = session.get(url, params={'id': file_id, 'confirm': token}, stream=True)
+token = None
+for k, v in response.cookies.items():
+    if k.startswith("download_warning"):
+        token = v
 
-          with open("C:\\Temp\\rocm-installer.exe", "wb") as f:
-              for chunk in response.iter_content(32768):
-                  if chunk:
-                      f.write(chunk)
+if token:
+    response = session.get(url, params={"id": file_id, "confirm": token}, stream=True)
 
-          print("ROCm installer downloaded")
-          PY
+with open(r"C:\Temp\rocm-installer.exe", "wb") as f:
+    for chunk in response.iter_content(32768):
+        if chunk:
+            f.write(chunk)
 
-      # Verify installer size (should be ~GBs)
+print("ROCm installer downloaded")
+'@ | python -
+
+      # Verify installer size (must be large!)
       - name: Verify installer
         shell: pwsh
         run: |
@@ -66,7 +73,7 @@ jobs:
           Write-Host "Installer size: $size bytes"
           if ($size -lt 1000000000) { throw "Installer download failed!" }
 
-      # Install ROCm SDK silently (SDK only, no drivers)
+      # Install ROCm HIP SDK silently (SDK only, no drivers)
       - name: Install ROCm HIP SDK
         shell: pwsh
         run: |
@@ -74,7 +81,7 @@ jobs:
             -ArgumentList "-install","-quiet","-norestart","-install_sdk","-log","C:\Temp\rocm-install.log" `
             -Wait -NoNewWindow
 
-      # Find ROCm toolchain paths
+      # Detect ROCm toolchain paths automatically
       - name: Detect ROCm paths
         shell: pwsh
         run: |
@@ -90,8 +97,8 @@ jobs:
           echo "HIP_DIR=$($hip.DirectoryName)" >> $env:GITHUB_ENV
           echo "HIPBLAS_DIR=$($hipblas.DirectoryName)" >> $env:GITHUB_ENV
 
-      # Build stable-diffusion.cpp HIPBLAS
-      - name: Build SD.cpp (HIPBLAS gfx1030)
+      # Build stable-diffusion.cpp with HIPBLAS for RX 6600M (gfx1030)
+      - name: Build SD.cpp HIPBLAS
         shell: pwsh
         run: |
           $env:HSA_OVERRIDE_GFX_VERSION="10.3.0"
