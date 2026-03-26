@@ -21,34 +21,36 @@ jobs:
             "rocm_sdk_libraries_custom-0.1.dev0-py3-none-win_amd64.whl"
           )
           
-          mkdir D:/ROCm_Temp
-          foreach ($c in $components) {
-            Write-Host "Downloading $c..."
-            Invoke-WebRequest -Uri "$base_url/$c" -OutFile "D:/ROCm_Temp/$c"
-            # Use 7-Zip to extract - it is much more reliable than Expand-Archive
-            7z x "D:/ROCm_Temp/$c" -o"D:/ROCm_Temp" -y | Out-Null
-          }
-          
-          # Debug: List top-level folders to verify extraction
-          Write-Host "Extraction complete. Looking for files..."
-          ls D:/ROCm_Temp -Recurse -Depth 2 | select Name, FullName
+          if (!(Test-Path "D:/ROCm_Temp")) { New-Item -ItemType Directory -Path "D:/ROCm_Temp" }
 
-          # Find the compiler
-          $clangPath = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "clang.exe" -Recurse | Select-Object -First 1 -ExpandProperty DirectoryName
-          
-          # Find the HIP Config
-          $hipConfig = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "hip-config.cmake" -Recurse | Select-Object -First 1 -ExpandProperty DirectoryName
-          
-          if (-not $clangPath) { throw "Could not find clang.exe!" }
-          if (-not $hipConfig) { 
-             Write-Host "Warning: hip-config.cmake not found. Searching for any .cmake files..."
-             Get-ChildItem -Path "D:/ROCm_Temp" -Filter "*.cmake" -Recurse | Select-Object -First 5 -ExpandProperty FullName
-             throw "Critical ROCm config files missing!" 
+          foreach ($c in $components) {
+            Write-Host "--- Starting: $c ---"
+            
+            # Use curl.exe with -L (follow redirects) and -f (fail on 404)
+            curl.exe -L -f -o "D:/ROCm_Temp/$c" "$base_url/$c"
+            
+            if ($LASTEXITCODE -ne 0) { throw "Download failed for $c. AMD server might be down or URL changed." }
+            
+            Write-Host "Extracting $c..."
+            # Using the full path to 7z just to be safe
+            & "C:\Program Files\7-Zip\7z.exe" x "D:/ROCm_Temp/$c" -o"D:/ROCm_Temp" -y | Out-Null
+            
+            if ($LASTEXITCODE -ne 0) { throw "Extraction failed for $c." }
+            
+            Remove-Item "D:/ROCm_Temp/$c" # Clean up to save space
+            Write-Host "Done with $c"
           }
+
+          # FIND THE COMPILER
+          $clang = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "clang.exe" -Recurse | Select-Object -First 1
+          $hip = Get-ChildItem -Path "D:/ROCm_Temp" -Filter "hip-config.cmake" -Recurse | Select-Object -First 1
           
-          echo "ROCM_BIN=$clangPath" >> $env:GITHUB_ENV
+          if (!$clang) { throw "Clang.exe not found anywhere in D:/ROCm_Temp!" }
+          if (!$hip) { throw "hip-config.cmake not found! Math libraries didn't extract correctly." }
+
+          echo "ROCM_BIN=$($clang.DirectoryName)" >> $env:GITHUB_ENV
           echo "ROCM_PATH=D:/ROCm_Temp" >> $env:GITHUB_ENV
-          Write-Host "Success: Compiler found at $clangPath"
+          Write-Host "Success: Build environment verified."
 
       - name: Build SD.CPP
         shell: pwsh
