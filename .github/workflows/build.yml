@@ -3,7 +3,7 @@ on: workflow_dispatch
 
 jobs:
   build:
-    runs-on: windows-2022 # 2022 is slightly more stable for the current HIP installer
+    runs-on: windows-2022
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -14,31 +14,41 @@ jobs:
       - name: Download HIP SDK
         shell: pwsh
         run: |
-          # The -UserAgent is the key to bypassing the AMD "Direct Download" block
-          Invoke-WebRequest -Uri "https://download.amd.com/developer/eula/rocm-hub/hip-sdk/7.1/amd-hip-sdk-7.1.1.exe" `
-            -OutFile "hip_sdk.exe" `
-            -UserAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+          # Mimic a real browser to bypass AMD's block
+          $url = "https://download.amd.com/developer/eula/rocm-hub/hip-sdk/7.1/amd-hip-sdk-7.1.1.exe"
+          $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
           
-          # Verify the file size (should be > 600MB)
-          $size = (Get-Item hip_sdk.exe).Length / 1MB
-          Write-Host "Downloaded file size: $size MB"
-          if ($size -lt 100) { throw "Download failed - file too small!" }
+          Invoke-WebRequest -Uri $url -OutFile "hip_sdk.exe" -UserAgent $ua
+          
+          # Check if we actually got the file
+          $file = Get-Item "hip_sdk.exe"
+          $sizeMB = [math]::Round($file.Length / 1MB, 2)
+          Write-Host "Downloaded file size: $sizeMB MB"
+          
+          if ($file.Length -lt 100MB) {
+              Write-Error "Download failed! We only got a tiny file. AMD is blocking the request."
+              exit 1
+          }
 
-      - name: Install HIP SDK (Silent)
+      - name: Install HIP SDK
         shell: pwsh
         run: |
-          # -install -boot is the official silent command for the AMD installer
+          # Silent install flags
           Start-Process ./hip_sdk.exe -ArgumentList "-install", "-boot" -Wait
           
-          # Give the system a second to register the paths
-          Start-Sleep -Seconds 10
+          # Verify the compiler exists before moving on
+          if (Test-Path "C:\Program Files\AMD\ROCm\7.1\bin\clang.exe") {
+              Write-Host "HIP SDK installed successfully!"
+          } else {
+              Write-Error "HIP SDK files not found in C:\Program Files\AMD\ROCm\7.1\bin"
+              exit 1
+          }
 
-      - name: Build with CMake
+      - name: Build SD.CPP
         shell: pwsh
         run: |
-          # Manually set the paths in case the installer didn't update the Global Path
-          $env:PATH = "C:\Program Files\AMD\ROCm\7.1\bin;C:\Program Files\AMD\ROCm\7.1\lib;$env:PATH"
-          
+          # Point directly to the new tools
+          $env:PATH = "C:\Program Files\AMD\ROCm\7.1\bin;$env:PATH"
           mkdir build; cd build
           cmake .. -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
@@ -48,10 +58,8 @@ jobs:
             -DGPU_TARGETS="gfx1030"
           ninja
 
-      - name: Upload Binaries
+      - name: Upload Result
         uses: actions/upload-artifact@v4
         with:
-          name: stable-diffusion-rocm-binaries
-          path: |
-            build/bin/*.exe
-            build/bin/*.dll
+          name: sd-cpp-binaries
+          path: build/bin/
