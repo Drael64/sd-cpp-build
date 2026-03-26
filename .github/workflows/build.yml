@@ -6,55 +6,86 @@ jobs:
     runs-on: windows-2022
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
         with:
           repository: leejet/stable-diffusion.cpp
           submodules: recursive
 
-      # 1️⃣ Install Ninja (missing!)
       - name: Install Ninja
+        shell: pwsh
         run: choco install ninja -y
 
-      # 2️⃣ Load MSVC environment (CRITICAL)
-      - name: Setup MSVC env
+      - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
-      # 3️⃣ Fetch ROCm Windows SDK
-      - name: Install ROCm SDK
+      - name: Download ROCm installer
         shell: pwsh
         run: |
-          $url = "https://repo.radeon.com/rocm/windows/rocm-rel-7.1.1/ROCm-Windows-Installer.exe"
-          curl.exe -L -o rocm.exe $url
-          Start-Process -FilePath ".\rocm.exe" -ArgumentList "-install","-quiet" -Wait
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path C:\Temp | Out-Null
 
-      # 4️⃣ Setup ROCm environment variables
-      - name: Setup ROCm ENV
+          # Put the REAL AMD download URL here (the one after the license page).
+          # Best practice: store it as a secret or repo variable.
+          $url = "${{ secrets.ROCM_INSTALLER_URL }}"
+          $out = "C:\Temp\rocm-installer.exe"
+
+          Write-Host "Downloading ROCm installer..."
+          Invoke-WebRequest -Uri $url -OutFile $out
+
+          $size = (Get-Item $out).Length
+          Write-Host "Installer size: $size bytes"
+
+          if ($size -lt 100MB) {
+            throw "Installer download is too small; likely an HTML/error page, not the real installer."
+          }
+
+      - name: Install ROCm silently
         shell: pwsh
         run: |
-          echo "HIP_PATH=C:/Program Files/AMD/ROCm/5.7" >> $env:GITHUB_ENV
-          echo "ROCM_PATH=C:/Program Files/AMD/ROCm/5.7" >> $env:GITHUB_ENV
-          echo "PATH=C:/Program Files/AMD/ROCm/5.7/bin;$env:PATH" >> $env:GITHUB_ENV
-          echo "HSA_OVERRIDE_GFX_VERSION=10.3.0" >> $env:GITHUB_ENV
-          echo "HIP_PLATFORM=amd" >> $env:GITHUB_ENV
+          $ErrorActionPreference = "Stop"
+          $installer = "C:\Temp\rocm-installer.exe"
+          Start-Process -FilePath $installer -ArgumentList "-install","-log","C:\Temp\rocm-install.log" -Wait -NoNewWindow
 
-      # 5️⃣ Configure + Build
-      - name: Build SD.cpp HIPBLAS
+      - name: Detect ROCm paths
         shell: pwsh
         run: |
-          mkdir build
-          cd build
+          $clang = Get-ChildItem "C:\Program Files\AMD\ROCm" -Recurse -Filter clang.exe | Select-Object -First 1
+          if (-not $clang) { throw "clang.exe not found under ROCm install." }
 
-          cmake .. -G Ninja `
-            -DSD_HIPBLAS=ON `
+          $hip = Get-ChildItem "C:\Program Files\AMD\ROCm" -Recurse -Filter hip-config.cmake | Select-Object -First 1
+          if (-not $hip) { throw "hip-config.cmake not found under ROCm install." }
+
+          $hipblas = Get-ChildItem "C:\Program Files\AMD\ROCm" -Recurse -Filter hipblas-config.cmake | Select-Object -First 1
+          if (-not $hipblas) { throw "hipblas-config.cmake not found under ROCm install." }
+
+          "ROCM_CLANG=$($clang.DirectoryName)" | Out-File -Append -FilePath $env:GITHUB_ENV
+          "HIP_DIR=$($hip.DirectoryName)" | Out-File -Append -FilePath $env:GITHUB_ENV
+          "HIPBLAS_DIR=$($hipblas.DirectoryName)" | Out-File -Append -FilePath $env:GITHUB_ENV
+
+      - name: Build SD.CPP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $clang = "${{ env.ROCM_CLANG }}\clang.exe"
+          $clangxx = "${{ env.ROCM_CLANG }}\clang++.exe"
+
+          cmake -S . -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
-            -DAMDGPU_TARGETS=gfx1030 `
+            -DSD_HIPBLAS=ON `
+            -DCMAKE_C_COMPILER="$clang" `
+            -DCMAKE_CXX_COMPILER="$clangxx" `
+            -DHIP_DIR="${{ env.HIP_DIR }}" `
+            -DHIPBLAS_DIR="${{ env.HIPBLAS_DIR }}" `
             -DGPU_TARGETS=gfx1030 `
+            -DAMDGPU_TARGETS=gfx1030 `
             -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON `
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON
 
-          ninja
+          cmake --build build --config Release
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload Binaries
+        uses: actions/upload-artifact@v4
         with:
           name: sd-cpp-rocm-binaries
           path: build/bin/*
