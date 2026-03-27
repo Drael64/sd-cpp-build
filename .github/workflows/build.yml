@@ -1,5 +1,4 @@
 name: ROCm Build Farm
-
 on:
   workflow_dispatch:
 
@@ -22,12 +21,12 @@ jobs:
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Download ROCm from GDrive
+      - name: Download ROCm 6.4.2 from GDrive
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           python -m pip install --disable-pip-version-check --quiet gdown
-          python -m gdown --fuzzy "https://drive.google.com/uc?id=14vPV_HnFMfEei0B1mhoyJDEgN6RksWEH" -O rocm-installer.exe
+          python -m gdown --fuzzy "https://drive.google.com/uc?id=1abKxjR4Teky3g4CkXGvaHVHalDgIsJSY" -O rocm-installer.exe
 
           if (!(Test-Path "rocm-installer.exe")) {
             throw "Download failed: rocm-installer.exe was not created"
@@ -66,35 +65,72 @@ jobs:
           Write-Host "ROCm root detected at: $rocmRoot"
 
           $hipCfg = Get-ChildItem $rocmRoot -Recurse -Filter "hip-config.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (!$hipCfg) {
-            throw "hip-config.cmake not found"
-          }
+          if (!$hipCfg) { throw "hip-config.cmake not found" }
 
           $hipblasCfg = Get-ChildItem $rocmRoot -Recurse -Filter "hipblas-config.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (!$hipblasCfg) {
-            throw "hipblas-config.cmake not found"
+          if (!$hipblasCfg) { throw "hipblas-config.cmake not found" }
+
+          echo "ROCM_ROOT=$rocmRoot"                                                        >> $env:GITHUB_ENV
+          echo "ROCM_BIN_PATH=$($clang.DirectoryName -replace '\\','/')"                   >> $env:GITHUB_ENV
+          echo "HIP_DIR_PATH=$($hipCfg.DirectoryName -replace '\\','/')"                   >> $env:GITHUB_ENV
+          echo "HIPBLAS_DIR_PATH=$($hipblasCfg.DirectoryName -replace '\\','/')"           >> $env:GITHUB_ENV
+
+      - name: Apply community gfx1032 ROCm libraries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sevenZip = "C:\Program Files\7-Zip\7z.exe"
+          $libUrl   = "https://github.com/likelovewant/ROCmLibs-for-gfx1103-AMD780M-APU/releases/download/v0.6.4.2/rocm.gfx1032.for.hip.6.4.2.7z"
+          $libArchive = "rocm-community-libs.7z"
+          $extractDir = "community-libs"
+
+          Write-Host "Downloading community rocblas libraries..."
+          Invoke-WebRequest -Uri $libUrl -OutFile $libArchive -UseBasicParsing
+
+          if (!(Test-Path $libArchive) -or (Get-Item $libArchive).Length -lt 1MB) {
+            throw "Community library download failed or suspiciously small"
+          }
+          Write-Host "Downloaded: $([math]::Round((Get-Item $libArchive).Length / 1MB, 2)) MB"
+
+          Write-Host "Extracting..."
+          & $sevenZip x $libArchive -o"$extractDir" -y | Out-Null
+
+          $binPath = "${{ env.ROCM_BIN_PATH }}"
+          $libraryDest = "$binPath/rocblas/library"
+
+          # Copy the root-level rocblas.dll into the ROCm bin folder
+          $rootDll = Get-ChildItem $extractDir -Filter "rocblas.dll" -Depth 0 -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($rootDll) {
+            Write-Host "Copying rocblas.dll to $binPath"
+            Copy-Item $rootDll.FullName "$binPath/rocblas.dll" -Force
+          } else {
+            Write-Host "WARNING: rocblas.dll not found in archive root - listing contents:"
+            Get-ChildItem $extractDir -Depth 1 | Select-Object FullName
           }
 
-          $hipblasCommonCfg = Get-ChildItem $rocmRoot -Recurse -Filter "hipblas-common-config.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (!$hipblasCommonCfg) {
-            throw "hipblas-common-config.cmake not found. The HIP SDK installation looks incomplete."
+          # Copy the library subfolder contents into rocblas\library
+          $libSrc = Get-ChildItem $extractDir -Directory -Filter "library" -Recurse | Select-Object -First 1
+          if ($libSrc) {
+            if (!(Test-Path $libraryDest)) {
+              New-Item -ItemType Directory -Path $libraryDest -Force | Out-Null
+            }
+            Write-Host "Copying library files to $libraryDest"
+            Copy-Item "$($libSrc.FullName)\*" $libraryDest -Force -Recurse
+          } else {
+            Write-Host "WARNING: library subfolder not found in archive - listing contents:"
+            Get-ChildItem $extractDir -Depth 2 | Select-Object FullName
           }
 
-          echo "ROCM_ROOT=$rocmRoot" >> $env:GITHUB_ENV
-          echo "ROCM_BIN_PATH=$($clang.DirectoryName -replace '\\','/')" >> $env:GITHUB_ENV
-          echo "HIP_DIR_PATH=$($hipCfg.DirectoryName -replace '\\','/')" >> $env:GITHUB_ENV
-          echo "HIPBLAS_DIR_PATH=$($hipblasCfg.DirectoryName -replace '\\','/')" >> $env:GITHUB_ENV
-          echo "HIPBLAS_COMMON_DIR_PATH=$($hipblasCommonCfg.DirectoryName -replace '\\','/')" >> $env:GITHUB_ENV
+          Write-Host "Community libraries applied successfully"
 
       - name: Build SD.cpp
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $env:HSA_OVERRIDE_GFX_VERSION = "10.3.0"
           $env:HIP_PLATFORM = "amd"
-          $env:HIP_PATH = "${{ env.ROCM_ROOT }}"
-          $env:ROCM_PATH = "${{ env.ROCM_ROOT }}"
+          $env:HIP_PATH     = "${{ env.ROCM_ROOT }}"
+          $env:ROCM_PATH    = "${{ env.ROCM_ROOT }}"
 
           $bin = "${{ env.ROCM_BIN_PATH }}"
 
@@ -110,11 +146,8 @@ jobs:
             -DCMAKE_PREFIX_PATH="${{ env.ROCM_ROOT }}" `
             -Dhip_DIR="${{ env.HIP_DIR_PATH }}" `
             -Dhipblas_DIR="${{ env.HIPBLAS_DIR_PATH }}" `
-            -Dhipblas-common_DIR="${{ env.HIPBLAS_COMMON_DIR_PATH }}" `
-            -DAMDGPU_TARGETS=gfx1030 `
-            -DGPU_TARGETS=gfx1030 `
-            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON `
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+            -DAMDGPU_TARGETS=gfx1032 `
+            -DGPU_TARGETS=gfx1032
 
           cmake --build build --config Release -v
 
